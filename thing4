@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+import pandas as pd, re, sys
+
+rawCsv   = "ATPToJira-Sheet1.csv"
+outCsv   = "atp_import.csv"
+initialNum = 5101
+rootParent = "RD-xxxxx"
+
+try:
+    df = pd.read_csv(rawCsv)
+except FileNotFoundError:
+    sys.exit(f"Could not find {rawCsv}")
+
+for i in df.index:
+    atpTest  = str(df.at[i, "ATP Test"]).rstrip()
+    atpTest  = re.sub(r"\s*\d+$", "", atpTest)
+    section  = str(df.at[i, "ATP Section"]).strip()
+    df.at[i, "ATP Test"] = f"{atpTest} {section}"
+
+if "dotCount" in df.columns:
+    df["dotCount"] = df["dotCount"].astype(int)
+else:
+    df["dotCount"] = df["ATP Section"].apply(lambda s: str(s).count("."))
+
+nextId       = initialNum
+parentStack  = {}
+issueIds     = []
+parentValues = []
+issueTypes   = []
+
+for i in df.index:
+    depth      = int(df.at[i, "dotCount"])
+    currentId  = nextId
+    nextId    += 1
+    parentVal  = rootParent if depth == 0 else parentStack.get(depth - 1, rootParent)
+    issueType  = ("New Feature" if depth == 0 else
+                  "Epic"        if depth == 1 else
+                  "Task"        if depth == 2 else
+                  "Sub-Task")
+    issueIds.append(currentId)
+    parentValues.append(parentVal)
+    issueTypes.append(issueType)
+    parentStack[depth] = currentId
+
+df["Parent"]     = parentValues
+df["Issue Id"]   = issueIds
+df["Issue Type"] = issueTypes
+
+wantedCols = ["ATP Test", "Parent", "Issue Id", "Issue Type", "dotCount"]
+df[wantedCols].to_csv(outCsv, index=False, encoding="utf-8")
+print(f"Wrote {outCsv} with {len(df)} rows, starting Issue Id = {initialNum}")
