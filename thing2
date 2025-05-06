@@ -1,0 +1,44 @@
+Below is a tiny Python snippet that will:
+	1.	Read your exported sheet CSV (e.g. Sheet1.csv)
+	2.	Append the section number onto the ATP Test column
+	3.	Keep exactly the columns you asked for:
+	•	ATP Test (now with section appended)
+	•	Parent
+	•	Issue Id
+	•	Issue Type
+	•	dot count (if that column exists)
+	4.	Write out atp_import.csv ready for JIRA
+
+import pandas as pd
+
+# 1. load your raw CSV
+df = pd.read_csv("Sheet1.csv")
+
+# 2. append the section to the ATP Test text
+#    (no "Summary" column at all)
+df["ATP Test"] = (
+    df["ATP Test"].astype(str)
+    + " "
+    + df["ATP Section"].astype(str)
+)
+
+# 3. pick only the columns you need
+wanted = ["ATP Test", "Parent", "Issue Id", "Issue Type", "dot count"]
+# filter to whatever actually exists in your sheet
+cols = [c for c in wanted if c in df.columns]
+out = df[cols]
+
+# 4. write your JIRA‑ready CSV
+out.to_csv("atp_import.csv", index=False, encoding="utf-8")
+
+print(f"Written atp_import.csv with columns: {cols}")
+
+How to use
+	1.	Download your Google Sheet as CSV (File → Download → CSV).
+	2.	Save the above as make_atp_csv.py in the same folder.
+	3.	Run:
+
+python make_atp_csv.py
+
+
+	4.	Take the resulting atp_import.csv into Jira → System → External System Import → CSV, map the fields, and import.
