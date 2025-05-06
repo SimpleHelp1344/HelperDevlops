@@ -1,0 +1,95 @@
+//----------------------------------------------
+// ATP‑to‑JIRA  ―  high‑level pseudocode outline
+//----------------------------------------------
+
+// 0.  CONFIG  ──────────────────────────────────
+CONFIG = {
+    atpFilePath      // full path to the Word / Excel ATP document
+    jiraProjectKey   // e.g. "RD"
+    defaultIssueType // e.g. "Task" for headings, "Sub‑task" for test cases
+    parentLinkType   // e.g. "Parent", "Epic Link", or "Blocks"
+    csvOutputPath    // path for the intermediary CSV (optional)
+    jiraAuth         // username / API token
+}
+
+
+// 1.  EXTRACT TABLE‑OF‑CONTENTS  ───────────────
+function parseATP(atpFilePath):
+    doc = openDocument(atpFilePath)        // use python‑docx, pandas, etc.
+    tocEntries = []
+
+    for each paragraph in doc:
+        if isHeading(paragraph):           // Heading 1, 2, 3…
+            level  = headingLevel(paragraph)
+            title  = clean(paragraph.text)
+            number = headingNumber(paragraph) // “3.1”, “TC‑001”, etc.
+            tocEntries.append({ level, title, number })
+
+    return tocEntries                      // preserves hierarchy order
+
+
+// 2.  BUILD ISSUE PAYLOADS  ───────────────────
+function mapToJiraIssues(tocEntries):
+    issues = []
+    stack  = []                            // keeps track of latest parent
+
+    for entry in tocEntries:
+        issue = {
+            "summary"    : entry.title
+            "issueType"  : chooseIssueType(entry.level)
+            "parentKey"  : null            // will be filled below
+            "fields"     : { /* extra custom fields here */ }
+        }
+
+        // parent/child linking based on heading level
+        while stack not empty AND stack.top.level >= entry.level:
+            stack.pop()
+
+        if stack not empty:
+            issue.parentKey = stack.top.tempKey   // use temp IDs first
+
+        // push current entry onto stack for future children
+        stack.push({ level: entry.level, tempKey: tmpID(issue) })
+        issues.append(issue)
+
+    return issues
+
+
+// 3A.  OPTION A: GENERATE CSV  ────────────────
+function writeCSV(issues, csvOutputPath):
+    csv = open(csvOutputPath, "w")
+    writeHeader(csv, ["Summary", "Issue Type", "Parent"])
+    for issue in issues:
+        writeRow(csv, [issue.summary, issue.issueType, issue.parentKey])
+    close(csv)
+
+
+// 3B.  OPTION B: CALL JIRA REST API DIRECTLY ─
+function createIssuesViaAPI(issues, jiraAuth, jiraProjectKey):
+    keyMap = {}                            // tempKey → real JIRA key
+
+    // first pass: create top‑level issues
+    for issue in issues where issue.parentKey == null:
+        response = POST /rest/api/3/issue  (payload(issue))
+        keyMap[issue.tempKey] = response.key
+
+    // second pass: create children, now that parents exist
+    for issue in issues where issue.parentKey != null:
+        issue.fields.parent = keyMap[issue.parentKey]
+        response = POST /rest/api/3/issue  (payload(issue))
+        keyMap[issue.tempKey] = response.key
+
+
+// 4.  DRIVER  ────────────────────────────────
+function main():
+    tocEntries = parseATP(CONFIG.atpFilePath)
+    issues     = mapToJiraIssues(tocEntries)
+
+    if wantCSVImport():
+        writeCSV(issues, CONFIG.csvOutputPath)
+        print("CSV ready → import manually in JIRA.")
+    else:
+        createIssuesViaAPI(issues, CONFIG.jiraAuth, CONFIG.jiraProjectKey)
+        print("Issues created in project " + CONFIG.jiraProjectKey)
+
+main()
