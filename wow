@@ -1,0 +1,152 @@
+Below is a minimal-to-full progression that stays in “pure Python” by relying on the excellent psutil package (cross-platform: Windows, macOS, Linux).
+If you can install third-party libraries, use Solution A; if you absolutely cannot install anything new, fall back to Solution B.
+
+⸻
+
+0 .  One-time setup (only for Solution A)
+
+pip install --upgrade psutil
+
+
+⸻
+
+1 .  Detect whether a process is running
+
+# solution_a.py
+import psutil
+
+def is_running(proc_name: str) -> bool:
+    """
+    Return True if *any* process whose executable name matches `proc_name`
+    is currently running (case-insensitive match on the base name).
+
+    >>> is_running("python")
+    True
+    """
+    proc_name = proc_name.lower()
+    for p in psutil.process_iter(attrs=["name"]):
+        # p.info["name"] is already the base executable name
+        if p.info["name"] and p.info["name"].lower() == proc_name:
+            return True
+    return False
+
+Quick test
+
+if __name__ == "__main__":
+    print(is_running("python"))      # likely True (this script itself)
+    print(is_running("definitely-not-real"))  # False
+
+
+⸻
+
+2 .  Also report how long the matching process has been running
+
+import time
+import datetime
+import psutil
+
+def running_for(proc_name: str):
+    """
+    Return (is_running: bool, uptime: datetime.timedelta | None).
+
+    * If the process isn't found -> (False, None)
+    * If found -> (True, timedelta_since_launch_of_oldest_match)
+    """
+    proc_name = proc_name.lower()
+    # Track the OLDEST instance in case multiple copies exist
+    oldest_start_time = None
+
+    for p in psutil.process_iter(attrs=["name", "create_time"]):
+        if p.info["name"] and p.info["name"].lower() == proc_name:
+            ct = p.info["create_time"]           # POSIX timestamp
+            oldest_start_time = ct if oldest_start_time is None else min(oldest_start_time, ct)
+
+    if oldest_start_time is None:
+        return False, None
+
+    uptime_seconds = time.time() - oldest_start_time
+    return True, datetime.timedelta(seconds=int(uptime_seconds))
+
+Example call:
+
+ok, up = running_for("python")
+if ok:
+    print(f"python has been up for {up}")
+else:
+    print("python not running")
+
+
+⸻
+
+3 .  Full “dashboard”: running, uptime, memory, CPU
+
+import psutil
+import time
+import datetime
+
+def process_stats(proc_name: str):
+    """
+    Return a dict with keys:
+        running  : bool
+        uptime   : datetime.timedelta | None
+        mem_mb   : float | None          # RSS memory (≈‘Working Set’)
+        cpu_pct  : float | None          # % CPU since last call
+    If multiple instances exist, stats refer to the *oldest* one.
+    """
+    proc_name = proc_name.lower()
+    target = None
+    # choose oldest to stay consistent with uptime concept above
+    for p in psutil.process_iter(attrs=["name", "create_time"]):
+        if p.info["name"] and p.info["name"].lower() == proc_name:
+            if target is None or p.info["create_time"] < target.info["create_time"]:
+                target = p
+
+    if target is None:
+        return {"running": False, "uptime": None, "mem_mb": None, "cpu_pct": None}
+
+    # NB: cpu_percent() returns *instant* % if called with interval=0.0
+    stats = {
+        "running": True,
+        "uptime": datetime.timedelta(seconds=int(time.time() - target.create_time())),
+        "mem_mb": target.memory_info().rss / (1024 ** 2),   # bytes → MiB
+        "cpu_pct": target.cpu_percent(interval=0.1),         # tiny wait for accuracy
+    }
+    return stats
+
+Sample run:
+
+>>> from solution_a import process_stats
+>>> process_stats("python")
+{'running': True,
+ 'uptime' : datetime.timedelta(seconds=823),
+ 'mem_mb' : 47.19,
+ 'cpu_pct': 0.0}
+
+
+⸻
+
+4 .  If you cannot install psutil (Solution B: portable but shell-dependent)
+
+import subprocess
+
+def is_running_pgrep(name: str) -> bool:
+    """
+    Unix-only fallback: uses the `pgrep` utility.
+    Returns True if any processes exactly match `name`.
+    """
+    try:
+        subprocess.check_output(["pgrep", "-x", name], stderr=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+(There is no equally clean, portable way to get uptime/CPU/memory without additional parsing of tools like ps, wmic, or tasklist; psutil exists to avoid that.)
+
+⸻
+
+What’s next?
+	•	Wrap these helpers into a small CLI (argparse) if you’d like to call them from the shell.
+	•	For Windows Service names vs. executable names, you might need extra handling: psutil.win_service_iter() can help.
+	•	If you need aggregated info from all matching instances, sum their memory and average their CPU %.
+
+Let me know if you need help integrating any of the above!
