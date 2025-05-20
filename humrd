@@ -1,0 +1,62 @@
+import argparse, subprocess, json, os, datetime as dt, math, pathlib, sys
+
+def _ffprobe(path, entry):
+    out = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_entries", entry, path],
+        capture_output=True, text=True, check=True
+    ).stdout
+    return json.loads(out)
+
+def creation_epoch(path):
+    t = _ffprobe(path, "format_tags=creation_time").get("format", {}).get("tags", {}).get("creation_time")
+    if t:
+        if t.endswith("Z"):
+            t = t[:-1]
+        return int(dt.datetime.fromisoformat(t).replace(tzinfo=dt.timezone.utc).timestamp())
+    try:
+        return int(os.path.getctime(path))
+    except OSError:
+        return None
+
+def video_duration(path):
+    dur = _ffprobe(path, "format=duration").get("format", {}).get("duration")
+    return float(dur) if dur else None
+
+def iso_epoch(s):
+    return int(dt.datetime.fromisoformat(s).timestamp())
+
+def extract_segment(src, dst, start_iso, end_iso):
+    start_ep, end_ep = iso_epoch(start_iso), iso_epoch(end_iso)
+    c_ep = creation_epoch(src)
+    if c_ep is None:
+        sys.exit("Could not determine video creation time.")
+    start_off = start_ep - c_ep
+    end_off   = end_ep   - c_ep
+    if start_off < 0 or end_off <= start_off:
+        sys.exit("Invalid start/end relative to creation time.")
+    vid_len = video_duration(src)
+    if vid_len and end_off > vid_len:
+        sys.exit("End time exceeds video length.")
+    dur = end_off - start_off
+    cmd = [
+        "ffmpeg", "-v", "error", "-y",
+        "-ss", str(start_off),
+        "-i", src,
+        "-t", str(dur),
+        "-c", "copy",
+        dst
+    ]
+    subprocess.run(cmd, check=True)
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("-start",      required=True, help="ISO-8601 start time")
+    p.add_argument("-end",        required=True, help="ISO-8601 end time")
+    p.add_argument("-videoPath",  required=True, help="input video file")
+    p.add_argument("-outPath",    help="output .mkv file")
+    a = p.parse_args()
+
+    src = a.videoPath
+    dst = a.outPath or (pathlib.Path(src).stem + "_segment.mkv")
+    extract_segment(src, dst, a.start, a.end)
+    print(f"Segment written to {dst}")
