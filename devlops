@@ -1,0 +1,80 @@
+Below is a drop-in version of ffprobeGetCreationTimeEpoch that
+	1.	invokes ffprobe in JSON mode (so you don’t have to parse text),
+	2.	looks for the creation_time tag that most cameras/NVRs write,
+	3.	handles the trailing “Z” that FFmpeg adds for UTC,
+	4.	converts the timestamp to seconds since the Unix epoch, and
+	5.	fails gracefully (returns None) if anything is missing.
+
+import subprocess
+import json
+import datetime as dt
+
+def ffprobeGetCreationTimeEpoch(filePath):
+    """
+    Use ffprobe to read the container's creation_time tag and
+    return it as an integer Unix epoch (UTC seconds).
+    Returns None if the tag is not present or ffprobe fails.
+    """
+    try:
+        # Build ffprobe command
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",                 # suppress stderr noise
+            "-print_format", "json",       # machine-readable output
+            "-show_entries", "format_tags=creation_time",
+            filePath
+        ]
+
+        # Run ffprobe
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        # Parse JSON
+        meta = json.loads(result.stdout)
+        creation_str = (
+            meta.get("format", {})
+                .get("tags", {})
+                .get("creation_time")
+        )
+        if not creation_str:
+            return None
+
+        # ffprobe returns ISO-8601 with trailing "Z" for UTC
+        if creation_str.endswith("Z"):
+            creation_str = creation_str[:-1]
+
+        # Parse as UTC and convert to epoch
+        creation_dt = dt.datetime.fromisoformat(creation_str).replace(
+            tzinfo=dt.timezone.utc
+        )
+        return int(creation_dt.timestamp())
+
+    except (subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            ValueError,
+            FileNotFoundError):
+        # CalledProcessError → ffprobe failed
+        # JSONDecodeError  → unexpected output
+        # ValueError       → bad date string
+        # FileNotFoundError→ ffprobe not installed
+        return None
+
+How to integrate it
+
+Replace the call to getCreationTimeEpoch(videoPath) with
+
+creationEpoch = ffprobeGetCreationTimeEpoch(videoPath)
+
+# Fallback to filesystem ctime if FFprobe didn't find anything
+if creationEpoch is None:
+    creationEpoch = getCreationTimeEpoch(videoPath)
+
+Prerequisites
+	•	FFmpeg/ffprobe must be installed and on your $PATH
+(e.g. sudo apt install ffmpeg on Ubuntu).
+
+That’s it—now the script uses the embedded recording time instead of the often-misleading filesystem ctime.
