@@ -1,0 +1,73 @@
+import cv2
+import argparse
+import subprocess
+import json
+import os
+import datetime as dt
+
+def ffprobeGetCreationTimeEpoch(path):
+    cmd = [
+        "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_entries", "format_tags=creation_time",
+        path
+    ]
+    try:
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+        tag = json.loads(out).get("format", {}).get("tags", {}).get("creation_time")
+        if not tag:
+            return None
+        tag = tag[:-1] if tag.endswith("Z") else tag
+        return int(dt.datetime.fromisoformat(tag).replace(tzinfo=dt.timezone.utc).timestamp())
+    except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError, FileNotFoundError):
+        return None
+
+def isoToEpoch(s):
+    return int(dt.datetime.fromisoformat(s).timestamp())
+
+def fallbackCreationEpoch(path):
+    try:
+        return int(os.path.getctime(path))
+    except OSError:
+        return None
+
+def playSegment(path, startEpoch, endEpoch, creationEpoch):
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    totalFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    startFrame = int((startEpoch - creationEpoch) * fps)
+    endFrame   = int((endEpoch   - creationEpoch) * fps)
+
+    if startFrame < 0 or endFrame <= startFrame or endFrame > totalFrames:
+        cap.release()
+        return
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, startFrame)
+    while cap.isOpened() and cap.get(cv2.CAP_PROP_POS_FRAMES) < endFrame:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        cv2.imshow("segment", frame)
+        if cv2.waitKey(int(1000 / fps)) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("-start", required=True)
+    p.add_argument("-end",   required=True)
+    p.add_argument("-videoPath", required=True)
+    a = p.parse_args()
+
+    videoPath   = a.videoPath
+    startEpoch  = isoToEpoch(a.start)
+    endEpoch    = isoToEpoch(a.end)
+    creationEpoch = ffprobeGetCreationTimeEpoch(videoPath) or fallbackCreationEpoch(videoPath)
+
+    playSegment(videoPath, startEpoch, endEpoch, creationEpoch)
