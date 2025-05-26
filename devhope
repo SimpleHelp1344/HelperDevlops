@@ -1,0 +1,127 @@
+Below is a straight-forward, no-frills Python 3 program that does exactly what you asked:
+	•	reads base.config and vehicle.config
+	•	for every non-comment, non-blank line that appears in vehicle.config, looks for the “same thing” in base.config (same section header or same device name)
+	•	if it finds it, the line from vehicle.config replaces the one in base.config
+	•	if it does not find it, the line from vehicle.config is simply appended
+	•	writes the merged result to a brand-new file (the original two files are never touched)
+
+⸻
+
+
+#!/usr/bin/env python3
+"""
+merge_simple.py
+Overlay vehicle-specific tweaks on top of a base configuration.
+
+USAGE
+=====
+    python merge_simple.py  base.config  vehicle.config  merged.config
+"""
+
+import sys
+from pathlib import Path
+
+
+# ───────────────────────── helper functions ─────────────────────────
+def read_lines(path: Path):
+    with path.open(encoding="utf-8") as fp:
+        return [ln.rstrip("\n") for ln in fp]
+
+
+def write_lines(path: Path, lines):
+    with path.open("w", encoding="utf-8") as fp:
+        for ln in lines:
+            fp.write(ln + "\n")
+
+
+def make_key(line: str):
+    """
+    Produce a simple identifier so we know when two lines talk about
+    the *same* thing.
+
+    • Section headers (all caps, no spaces, no commas) get key “SECTION:<name>”
+    • Everything else uses the first token (up to the first comma) as the key.
+      If a Name=… field is present, that’s added to keep LMS sensors, CAMs, etc.
+      distinct from one another.
+
+    Comment lines and blanks return None (ignored for merging).
+    """
+    txt = line.strip()
+
+    if not txt or txt.startswith("#"):
+        return None
+
+    # Section header?
+    if txt.isupper() and "," not in txt and " " not in txt:
+        return "SECTION:" + txt
+
+    first = txt.split(",", 1)[0].strip()
+
+    if "Name=" in txt:
+        # pull just the value after Name=
+        name_val = txt.split("Name=", 1)[1].split(",", 1)[0]
+        return f"{first}:Name={name_val}"
+
+    return first
+
+
+def merge(base_lines, vehicle_lines):
+    """
+    Overlay vehicle_lines on top of base_lines and return the merged list.
+    """
+    merged = list(base_lines)            # start with an exact copy
+    index = {}
+
+    # Build quick look-up: key → line-number in merged
+    for pos, ln in enumerate(merged):
+        k = make_key(ln)
+        if k is not None:
+            index[k] = pos
+
+    # Walk through every relevant line in vehicle.config
+    for vln in vehicle_lines:
+        k = make_key(vln)
+        if k is None:
+            # comment / blank → just ignore
+            continue
+
+        if k in index:
+            # same thing already in base ⇒ replace it
+            merged[index[k]] = vln
+        else:
+            # completely new ⇒ append to the end
+            merged.append(vln)
+
+    return merged
+
+
+# ────────────────────────────── main ───────────────────────────────
+def main():
+    if len(sys.argv) != 4:
+        print(
+            "Usage:\n"
+            "  python merge_simple.py  base.config  vehicle.config  merged.config"
+        )
+        sys.exit(1)
+
+    base_path, vehicle_path, out_path = map(Path, sys.argv[1:4])
+
+    base_lines = read_lines(base_path)
+    vehicle_lines = read_lines(vehicle_path)
+
+    merged_lines = merge(base_lines, vehicle_lines)
+
+    write_lines(out_path, merged_lines)
+
+
+if __name__ == "__main__":
+    main()
+
+
+⸻
+
+How to run it
+
+python merge_simple.py  base.config  vehicle.config  merged.config
+
+You will get merged.config containing the original base configuration with every differing line cleanly overridden by the values from vehicle.config. The two source files remain untouched, and there’s no “clever” one-liners—just clear loops and decisions you can read at a glance.
