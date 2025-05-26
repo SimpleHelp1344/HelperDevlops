@@ -1,0 +1,194 @@
+Below is a straight-ahead Python 3 script that takes a base config, a vehicle-specific config, and writes a new file where anything mentioned in vehicle.config cleanly overrides (or adds to) what’s in base.config.
+
+#!/usr/bin/env python3
+"""
+merge_configs.py
+Overlay a vehicle-specific configuration on top of a base configuration.
+
+Usage
+-----
+    python merge_configs.py base.config vehicle.config merged.config
+"""
+from __future__ import annotations
+import sys
+from pathlib import Path
+from typing import List, Dict, Tuple
+
+
+# ──────────────────────────── helpers ────────────────────────────
+def is_header(line: str) -> bool:
+    """Treat any all-caps line (no spaces/commas) as a section header."""
+    s = line.strip()
+    return (
+        s
+        and s.isupper()
+        and " " not in s
+        and "," not in s
+        and not s.startswith("#")
+    )
+
+
+def split_into_sections(lines: List[str]) -> List[Tuple[str, List[str]]]:
+    """Return an ordered list of  (header, [section-lines])."""
+    sections: List[Tuple[str, List[str]]] = []
+    current_header = ""
+    current_lines: List[str] = []
+
+    for ln in lines:
+        if is_header(ln):
+            sections.append((current_header, current_lines))
+            current_header = ln.rstrip("\n")
+            current_lines = []
+        else:
+            current_lines.append(ln.rstrip("\n"))
+
+    sections.append((current_header, current_lines))
+    return sections
+
+
+def generate_key(record_line: str) -> str:
+    """
+    Produce a stable identifier for one record line.
+    Priority → first token, then Name=…, CANID=…, Port=…, IP=….
+    """
+    body = record_line.strip()
+
+    if not body or body.startswith("#"):
+        return "__COMMENT__:" + body
+
+    if " #" in body:                         # strip inline comment
+        body = body.split(" #", 1)[0]
+
+    tokens = body.split(",")
+    device = tokens[0].strip()
+
+    name = canid = port = ip = ""
+
+    for tok in tokens[1:]:
+        tok = tok.strip()
+        if tok.startswith("Name="):
+            name = tok.split("=", 1)[1]
+        elif tok.startswith("CANID="):
+            canid = tok.split("=", 1)[1]
+        elif tok.startswith("Port="):
+            port = tok.split("=", 1)[1]
+        elif tok.startswith("IP="):
+            ip = tok.split("=", 1)[1]
+
+    if name:
+        return f"{device}:Name={name}"
+    if canid:
+        return f"{device}:CANID={canid}"
+    if port:
+        return f"{device}:Port={port}"
+    if ip:
+        return f"{device}:IP={ip}"
+
+    return device + ":" + body              # fallback
+
+
+def merge_lists(base: List[str], veh: List[str]) -> List[str]:
+    """Merge record lists, letting vehicle lines override base lines."""
+    result: List[str] = []
+    index: Dict[str, int] = {}
+
+    for i in range(len(base)):
+        key = generate_key(base[i])
+        index[key] = i
+        result.append(base[i])
+
+    for vln in veh:
+        key = generate_key(vln)
+        if key in index:
+            result[index[key]] = vln         # replace
+        else:
+            result.append(vln)               # new
+    return result
+
+
+def merge_sections(
+    base_secs: List[Tuple[str, List[str]]],
+    veh_secs:  List[Tuple[str, List[str]]],
+) -> List[Tuple[str, List[str]]]:
+    """Overlay vehicle sections on top of base sections."""
+    merged: List[Tuple[str, List[str]]] = []
+    veh_lookup: Dict[str, List[str]] = {}
+    for hdr, lines in veh_secs:
+        veh_lookup[hdr] = lines
+
+    for hdr, base_lines in base_secs:
+        if hdr in veh_lookup and veh_lookup[hdr]:
+            vlines = veh_lookup[hdr]
+            if len(base_lines) <= 1 or len(vlines) <= 1:
+                merged.append((hdr, vlines))             # single-line → replace
+            else:
+                merged.append((hdr, merge_lists(base_lines, vlines)))
+            veh_lookup[hdr] = []                         # mark done
+        else:
+            merged.append((hdr, base_lines))
+
+    # any sections that exist only in vehicle.config
+    for hdr, lines in veh_secs:
+        if veh_lookup.get(hdr):
+            merged.append((hdr, veh_lookup[hdr]))
+
+    return merged
+
+
+def write_sections(sections: List[Tuple[str, List[str]]], path: Path) -> None:
+    with path.open("w", encoding="utf-8") as fp:
+        wrote_any = False
+        for hdr, lines in sections:
+            if hdr:                                       # skip prologue header
+                if wrote_any:
+                    fp.write("\n")
+                fp.write(f"{hdr}\n")
+                wrote_any = True
+            for ln in lines:
+                fp.write(ln.rstrip("\n") + "\n")
+
+
+# ────────────────────────────── main ─────────────────────────────
+def main() -> None:
+    if len(sys.argv) != 4:
+        print("Usage:  python merge_configs.py base.config vehicle.config merged.config")
+        sys.exit(1)
+
+    base_path    = Path(sys.argv[1])
+    vehicle_path = Path(sys.argv[2])
+    out_path     = Path(sys.argv[3])
+
+    with base_path.open(encoding="utf-8") as fb:
+        base_lines = fb.readlines()
+    with vehicle_path.open(encoding="utf-8") as fv:
+        vehicle_lines = fv.readlines()
+
+    base_secs = split_into_sections(base_lines)
+    veh_secs  = split_into_sections(vehicle_lines)
+    merged    = merge_sections(base_secs, veh_secs)
+    write_sections(merged, out_path)
+
+
+if __name__ == "__main__":
+    main()
+
+How it works (in plain English)
+	1.	Section detection – Any line that’s all caps with no spaces or commas is treated as a section header (e.g. DEVICES, CHASSIS).
+	2.	Stable record keys – Inside each section, every non-comment line gets a unique key based on:
+	•	device type (first token) → LMS, CAN, RADAR, etc.
+	•	then Name=…, CANID=…, Port=…, or IP=… if found
+This lets us decide when two lines describe the same thing.
+	3.	Overlay logic
+	•	If a section is essentially a single setting (one line), the line from vehicle.config replaces the one in base.config.
+	•	For list-style sections (e.g. DEVICES), each matching record is replaced; brand-new records from vehicle.config are appended.
+	4.	Output – Everything is written back out in the original order, comments and blank lines preserved.
+
+Running it
+
+python merge_configs.py base.config vehicle.config merged.config
+
+You’ll end up with merged.config containing the base configuration plus any tweaks from the vehicle file.
+
+⸻
+
+If you later decide the file format should change (e.g., switch to INI, YAML, or JSON), the overlay idea stays the same—you’d just swap the parsing/merge part while keeping the top-level flow identical.
