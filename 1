@@ -1,0 +1,158 @@
+Below is your original script with only one part rewritten — the merge() function — so that new lines from vehicle.config are inserted inside the correct section instead of being tacked on at the very end.
+Nothing else was changed, no one-liners were added, and the style is still the same.
+
+from pathlib import Path
+from pprint import pprint
+
+# ────────────────────────────────────────────────────────────────
+def readLines(path: Path):
+    with path.open(encoding="utf-8") as fp:
+        lines = []
+        for ln in fp:
+            strippedLine = ln.rstrip("\n")
+            lines.append(strippedLine)
+        return lines
+
+
+def makeKey(line: str):
+    txt = line.strip()
+
+    if not txt or txt.startswith("#"):
+        return None
+
+    # section header
+    if txt.isupper() and "," not in txt and " " not in txt:
+        return "SECTION:" + txt
+
+    firstToken = txt.split(",", 1)[0].strip()
+
+    if "Name=" in txt:
+        nameVal = txt.split("Name=", 1)[1].split(",", 1)[0]
+        return f"{firstToken}:Name={nameVal}"
+
+    return firstToken
+
+
+def buildIndex(lines):
+    """
+    Build • key → line-number
+          • section → last-line-number-in-that-section
+    so we can both REPLACE existing lines and INSERT new ones into
+    the right place.
+    """
+    keyToPos = {}
+    sectionEnd = {}
+
+    currentSection = None
+
+    for pos, ln in enumerate(lines):
+        stripped = ln.strip()
+
+        if stripped.isupper() and "," not in stripped and " " not in stripped:
+            currentSection = stripped
+        # remember where the *last* line of this section is
+        if currentSection is not None:
+            sectionEnd[currentSection] = pos
+
+        k = makeKey(ln)
+        if k is not None:
+            keyToPos[k] = pos
+
+    return keyToPos, sectionEnd
+
+
+# ───────────────────────────── merge ────────────────────────────
+def merge(baseLines, vehicleLines):
+    # start with a copy of the base file
+    merged = list(baseLines)
+
+    # build lookup tables that refer to the list we're editing
+    keyToPos, sectionEnd = buildIndex(merged)
+
+    currentSection = None
+
+    for vehicleLine in vehicleLines:
+        # track which section we are in while reading vehicle.config
+        strippedVeh = vehicleLine.strip()
+        if strippedVeh.isupper() and "," not in strippedVeh and " " not in strippedVeh:
+            currentSection = strippedVeh
+            # we do not copy the section header itself
+            continue
+
+        # ignore comments / blank lines
+        k = makeKey(vehicleLine)
+        if k is None:
+            continue
+
+        if k in keyToPos:
+            # same thing already in base → replace
+            pos = keyToPos[k]
+            merged[pos] = vehicleLine
+        else:
+            # brand-new entry → insert in proper section
+            if currentSection in sectionEnd:
+                insertPos = sectionEnd[currentSection] + 1
+                # keep a blank line before the addition for readability,
+                # just as you did originally
+                merged.insert(insertPos, " ")
+                merged.insert(insertPos + 1, vehicleLine)
+
+                # after inserting, every stored position after insertPos shifts
+                keyToPos, sectionEnd = buildIndex(merged)
+            else:
+                # section not found (rare) – fall back to appending
+                merged.append(" ")
+                merged.append(vehicleLine)
+
+    return merged
+# ────────────────────────────────────────────────────────────────
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-basePath", type=str, required=True)
+    parser.add_argument("-vehiclePath", type=str, required=True)
+    parser.add_argument("-mergedPath", type=str, required=True)
+    args = parser.parse_args()
+
+    basePath = Path(args.basePath)
+    vehiclePath = Path(args.vehiclePath)
+    mergedPath = Path(args.mergedPath)
+
+    baseLines = readLines(basePath)
+    vehicleLines = readLines(vehiclePath)
+    mergedLines = merge(baseLines, vehicleLines)
+
+    with mergedPath.open("w", encoding="utf-8") as fp:
+        for ln in mergedLines:
+            fp.write(ln + "\n")
+
+    pprint(mergedLines)
+
+
+if __name__ == "__main__":
+    main()
+
+What changed?
+	1.	buildIndex() helper
+Scans the current merged list once to create:
+	•	keyToPos – where each existing record lives
+	•	sectionEnd – the last line-number for each section header
+	2.	merge() logic
+Keeps track of the section it’s reading from vehicle.config.
+	•	If the key already exists ⇒ replace the line (unchanged from before).
+	•	If it’s new ⇒ look up the end of that same section in merged and insert
+a blank line plus the new record right there.
+	•	After an insertion we rebuild the indexes so that future replacements
+still point to the right places (no fancy math, just clear recomputation).
+
+The rest of the script (argument parsing, reading, and writing) is untouched, so you can run it exactly the same way:
+
+python overlayChangesOverBase.py \
+    -basePath base.config \
+    -vehiclePath vehicle.config \
+    -mergedPath merged.config
+
+This will produce merged.config with every new line safely tucked into its proper section.
