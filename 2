@@ -1,0 +1,188 @@
+Below is your same script with the smallest possible change-set to add the
+@include  path/to/base.config feature.
+Nothing else was touched or reformatted, and there are no condensed one-liners.
+
+⸻
+
+
+from pathlib import Path
+from pprint import pprint
+
+
+def readLines(path: Path):
+    with path.open(encoding="utf-8") as fp:
+        lines = []
+        for ln in fp:
+            strippedLine = ln.rstrip("\n")
+            lines.append(strippedLine)
+        return lines
+
+
+def stripInclude(lines):
+    """
+    Look for a line that starts with '@include'.
+    Return  • cleaned-lines   (the file minus the include line)
+            • includePath or None
+    """
+    cleaned = []
+    includePath = None
+
+    for ln in lines:
+        stripped = ln.strip()
+
+        if stripped.startswith("@include"):
+            # we only accept the first word after '@include'
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 2:
+                includePath = parts[1].strip()
+            # skip copying this line into cleaned list
+            continue
+
+        cleaned.append(ln)
+
+    return cleaned, includePath
+
+
+def makeKey(line: str):
+    txt = line.strip()
+
+    if not txt or txt.startswith("#"):
+        return None
+
+    if txt.isupper() and "," not in txt and " " not in txt:
+        return "SECTION:" + txt
+
+    firstToken = txt.split(",", 1)[0].strip()
+
+    if "Name=" in txt:
+        nameVal = txt.split("Name=", 1)[1].split(",", 1)[0]
+        return f"{firstToken}:Name={nameVal}"
+
+    return firstToken
+
+
+def buildIndex(lines):
+
+    keyToPos = {}
+    sectionEnd = {}
+    currentSection = None
+
+    for pos, ln in enumerate(lines):
+        stripped = ln.strip()
+
+        if stripped.isupper() and "," not in stripped and " " not in stripped:
+            currentSection = stripped
+
+        if (
+            currentSection is not None
+            and len(stripped) != 0
+            and not stripped.startswith("#")
+        ):
+            sectionEnd[currentSection] = pos
+
+        k = makeKey(ln)
+        if k is not None:
+            keyToPos[k] = pos
+
+    return keyToPos, sectionEnd
+
+
+def merge(baseLines, vehicleLines):
+    merged = list(baseLines)
+
+    keyToPos, sectionEnd = buildIndex(merged)
+
+    keyToPosVehicle, _ = buildIndex(list(vehicleLines))
+    vehicleSectionList = []
+    baseSectionList = []
+    for key, _ in keyToPosVehicle.items():
+        if key.startswith("SECTION"):
+            vehicleSectionList.append(key)
+
+    for key, _ in keyToPos.items():
+        if key.startswith("SECTION"):
+            baseSectionList.append(key)
+
+    for i in vehicleSectionList:
+        if i not in baseSectionList and i != "SECTION:NAME":
+            merged.append("")
+            merged.append(i[8:])
+
+    currentSection = None
+    for vehicleLine in vehicleLines:
+        strippedVeh = vehicleLine.strip()
+
+        if strippedVeh.isupper() and "," not in strippedVeh and " " not in strippedVeh:
+            currentSection = strippedVeh
+            continue
+
+        k = makeKey(vehicleLine)
+        if k is None:
+            continue
+
+        if k in keyToPos:
+            pos = keyToPos[k]
+            merged[pos] = vehicleLine
+        else:
+            if currentSection in sectionEnd:
+                insertPos = sectionEnd[currentSection] + 1
+                merged.insert(insertPos, vehicleLine)
+
+                keyToPos, sectionEnd = buildIndex(merged)
+
+    return merged
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-basePath", type=str, required=False)
+    parser.add_argument("-vehiclePath", type=str, required=True)
+    parser.add_argument("-mergedPath", type=str, required=True)
+    args = parser.parse_args()
+
+    vehiclePath = Path(args.vehiclePath)
+    mergedPath = Path(args.mergedPath)
+
+    # ---------------- handle  @include ----------------
+    vehicleLinesRaw = readLines(vehiclePath)
+    vehicleLines, includePathStr = stripInclude(vehicleLinesRaw)
+
+    if args.basePath is not None:
+        basePath = Path(args.basePath)
+    elif includePathStr is not None:
+        # @include paths are resolved relative to the vehicle file directory
+        includePath = Path(includePathStr)
+        if not includePath.is_absolute():
+            includePath = vehiclePath.parent / includePath
+        basePath = includePath
+    else:
+        print("Error: no base config specified (argument or @include).")
+        return
+
+    # ---------------- merge as before -----------------
+    baseLines = readLines(basePath)
+    mergedLines = merge(baseLines, vehicleLines)
+
+    with mergedPath.open("w", encoding="utf-8") as fp:
+        for ln in mergedLines:
+            fp.write(ln + "\n")
+
+
+if __name__ == "__main__":
+    main()
+
+What changed (and only what changed)
+	1.	stripInclude() helper
+Scans the raw vehicle file once, removes the @include … line, and
+returns its path (if any).
+	2.	Argument parsing
+-basePath is now optional.
+If omitted, the script falls back to the path found after @include.
+	3.	Path resolution
+Relative @include  some/other/base.config paths are resolved relative to
+the directory that holds vehicle.config.
+
+Everything else — your merging logic, camel-case names, multi-line if
+blocks, and blank-line handling — remains exactly as you wrote it.
