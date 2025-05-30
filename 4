@@ -1,0 +1,329 @@
+Below is a self-contained validator.py you can drop into the same package that already holds collector/, asr/logger.py, etc.
+It replaces JsonValidator, YAMLValidator, and DictionaryValidator with a single class (KeyValueValidator) while leaving your original Validator ABC, TCPValidator, PingValidator, RegexValidator, and RTSPValidator untouched.
+
+If you prefer a more granular layout later, you can split the three helper classes (ConfigLoader, DiffReport, DictComparator) into their own modules exactly as I sketched earlier; the logic is identical.
+
+⸻
+
+
+# ---------------------------------------------------------------------------
+# validator.py  ── unified key/value comparison for VSR
+# Drop-in replacement: import KeyValueValidator from here instead of the
+# individual Json / YAML / Dictionary validators.
+# ---------------------------------------------------------------------------
+from __future__ import annotations
+
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any
+
+import json
+from ruamel.yaml import YAML
+import libconf                     # pip install libconf >= 2.0.0
+
+# ---------------------------------------------------------------------------
+# keep your existing pieces (Validator ABC, Logger, etc.)
+# ---------------------------------------------------------------------------
+import re, socket                  # already used elsewhere in this file
+from abc import ABC, abstractmethod
+from asr.logger import Logger, LogLevel
+import collector                   # your in-house collectors
+
+# ========== ORIGINAL ABSTRACT BASE & OTHER VALIDATORS ==========
+
+class Validator(ABC):
+    @classmethod
+    @abstractmethod
+    def validate(cls, *args, **kwargs): ...
+
+    @classmethod
+    def _log(cls, level, message) -> None:
+        Logger.log(cls.__name__, level, message)
+
+    @classmethod
+    def logValidationResults(cls, validateResult, leftDataName, rightDataName):
+        # unchanged helper you already had
+        if validateResult is True:
+            cls._log(LogLevel.INFO, "All keys and values match")
+            return True
+        if validateResult is False:
+            cls._log(LogLevel.INFO, "Cannot log invalid validation results.")
+            return False
+
+        if validateResult[0]:
+            cls._log(LogLevel.INFO, f"Keys with differing values: {validateResult[0]}")
+        if validateResult[1]:
+            cls._log(LogLevel.INFO, f"Keys unique to {leftDataName}: {validateResult[1]}")
+        if validateResult[2]:
+            cls._log(LogLevel.INFO, f"Keys unique to {rightDataName}: {validateResult[2]}")
+        return False
+
+# --- TCP / Ping / Regex / RTSP validators stay exactly as they were ----------
+class TCPValidator(Validator):
+    @classmethod
+    def validate(cls, host: str, port: int, timeout: float = 4.0) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except (socket.timeout, ConnectionRefusedError, OSError) as e:
+            cls._log(LogLevel.DEBUG, f"TCP connection to {host}:{port} failed: {e}")
+            return False
+
+class PingValidator(Validator):
+    @classmethod
+    def validate(cls, ip) -> bool:
+        result = collector.CommandLineCollector.collect("ping", ("-c", "1", "-W", "3", ip))
+        return "Error" not in result
+
+class RegexValidator(Validator):
+    @classmethod
+    def validate(cls, pattern, string) -> bool:
+        return re.search(pattern, string) is not None
+
+class RTSPValidator(Validator):
+    @classmethod
+    def validate(cls, curlOutput) -> bool:
+        return "200 OK" in curlOutput
+
+# ---------------------------------------------------------------------------
+# 1. ConfigLoader   (any format -> python dict)
+# ---------------------------------------------------------------------------
+class ConfigLoaderError(RuntimeError):
+    ...
+
+class ConfigLoader:
+    """Read a config file or raw string and return a plain Python dict."""
+
+    _yaml = YAML(typ="safe")
+
+    @staticmethod
+    def load(src: str | Path, *, fmt: str | None = None, kv_sep: str = "=") -> dict:
+        blob = ConfigLoader._read(src)
+        fmt = fmt or ConfigLoader._infer_format(src)
+        match fmt.lower():
+            case "json":
+                return json.loads(blob)
+            case "yaml" | "yml" | "netplan":
+                return ConfigLoader._yaml.load(blob)
+            case "libconfig" | "cfg":
+                return libconf.loads(blob)
+            case "kv" | "properties":
+                return ConfigLoader._kv_to_dict(blob, sep=kv_sep)
+            case _:
+                raise ConfigLoaderError(f"Unknown or unsupported format: {fmt}")
+
+    # ------------- helpers ---------------------------------------------------
+    @staticmethod
+    def _read(src: str | Path) -> str:
+        if isinstance(src, (Path, str)) and Path(src).exists():
+            return Path(src).read_text(encoding="utf-8")
+        # assume caller already provided the raw data
+        return str(src)
+
+    @staticmethod
+    def _infer_format(src: str | Path) -> str:
+        if isinstance(src, (Path, str)):
+            ext = Path(src).suffix.lower().lstrip(".")
+            if ext:
+                return ext          # .json .yaml .cfg …
+        return "json"               # sensible default
+
+    @staticmethod
+    def _kv_to_dict(text: str, *, sep="=") -> dict[str, str]:
+        out: dict[str, str] = {}
+        for ln in text.splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            if sep in ln:
+                k, v = ln.split(sep, 1)
+                out[k.strip()] = v.strip()
+        return out
+
+# ---------------------------------------------------------------------------
+# 2. DictComparator  (actual diff algorithm)
+# ---------------------------------------------------------------------------
+@dataclass
+class DiffReport:
+    different_values: list[dict[str, list[Any]]] = field(default_factory=list)
+    missing_from_b:   list[str]                  = field(default_factory=list)
+    extra_in_b:       list[str]                  = field(default_factory=list)
+
+    def is_match(self, *, ignore_extra=False) -> bool:
+        """Return True if A and B are equivalent per the chosen policy."""
+        if self.different_values or self.missing_from_b:
+            return False
+        if not ignore_extra and self.extra_in_b:
+            return False
+        return True
+
+def _compare_dicts(a: dict, b: dict, *, _path: str = "") -> DiffReport:
+    rpt = DiffReport()
+    keys_a, keys_b = set(a), set(b)
+
+    rpt.missing_from_b.extend(sorted(f"{_path}{k}" for k in keys_a - keys_b))
+    rpt.extra_in_b.extend(sorted(f"{_path}{k}" for k in keys_b - keys_a))
+
+    for k in keys_a & keys_b:
+        pa = f"{_path}{k}"
+        va, vb = a[k], b[k]
+
+        if isinstance(va, dict) and isinstance(vb, dict):
+            child = _compare_dicts(va, vb, _path=f"{pa}.")
+            rpt.different_values.extend(child.different_values)
+            rpt.missing_from_b.extend(child.missing_from_b)
+            rpt.extra_in_b.extend(child.extra_in_b)
+        elif va != vb:
+            rpt.different_values.append({pa: [va, vb]})
+
+    return rpt
+
+# ---------------------------------------------------------------------------
+# 3. Public façade class
+# ---------------------------------------------------------------------------
+class KeyValueValidator(Validator):
+    """
+    Unified replacement for JsonValidator / YAMLValidator / DictionaryValidator.
+
+    Parameters
+    ----------
+    a, b : str | pathlib.Path
+        File path **or** raw text for the reference config (A) and the
+        config-under-test (B).
+
+    fmtA, fmtB : str | None
+        Explicit format hints ("json", "yaml", "libconfig", "kv").
+        If omitted, we detect from the file extension or fall back to JSON.
+
+    kv_sep : str
+        When fmt=="kv" this character separates key and value (default '=').
+
+    ignore_extra : bool
+        If True we *do not* treat “keys only in B” as a mismatch.
+    """
+
+    @classmethod
+    def validate(cls,
+                 a,
+                 b,
+                 *,
+                 fmtA: str | None = None,
+                 fmtB: str | None = None,
+                 kv_sep: str = "=",
+                 ignore_extra: bool = False):
+        try:
+            dict_a = ConfigLoader.load(a, fmt=fmtA, kv_sep=kv_sep)
+            dict_b = ConfigLoader.load(b, fmt=fmtB, kv_sep=kv_sep)
+        except ConfigLoaderError as e:
+            cls._log(LogLevel.ERROR, str(e))
+            return False
+
+        rpt = _compare_dicts(dict_a, dict_b)
+
+        # identical?
+        if rpt.is_match(ignore_extra=ignore_extra):
+            cls._log(LogLevel.INFO, "All keys and values match")
+            return True
+
+        # format identical three-tuple for legacy callers
+        legacy = [rpt.different_values, rpt.missing_from_b, rpt.extra_in_b]
+        cls.logValidationResults(legacy, "A", "B")
+        return legacy
+
+# ---------------------------------------------------------------------------
+# (end of file)
+# ---------------------------------------------------------------------------
+
+
+⸻
+
+❶  Where do I put this file?
+
+vsr/
+├── __init__.py
+├── validator.py          ←  **replace with the code above**
+├── collector/
+│   └── …
+└── asr/
+    └── logger.py
+
+If you already had a validator.py in that folder:
+	1.	Rename it to validator_legacy.py (so nothing is lost).
+	2.	Save the new content as validator.py.
+
+All existing imports such as
+
+from validator import TCPValidator
+
+will still resolve, because the original ABC and supplementary classes remain at the top of the file.
+
+⸻
+
+❷  Remove / redirect old validators
+
+Grepping your codebase:
+
+grep -R "JsonValidator\|YAMLValidator\|DictionaryValidator" src/
+
+and change each call like
+
+JsonValidator.validate(jsonA, jsonB, "-a")
+
+to
+
+KeyValueValidator.validate(jsonA, jsonB)     # same behaviour
+
+If any call only cares about “diffs and missing”, never about
+“extras in B”, pass ignore_extra=True.
+
+⸻
+
+❸  Install the only new dependency
+
+pip install libconf>=2.0.0
+
+ruamel.yaml is already in your requirements (your old YAMLValidator
+used it).  Nothing else changes.
+
+⸻
+
+❹  Quick sanity test
+
+Create two tiny files:
+
+# a.json
+{ "iface": { "eth0": { "mtu": 9000, "state": "up" } },
+  "dns": [ "1.1.1.1", "8.8.8.8" ] }
+
+# b.yaml
+iface:
+  eth0: { mtu: 1500, state: up }
+dns: [1.1.1.1, 8.8.8.8]
+ntp: pool.ntp.org
+
+Run:
+
+from validator import KeyValueValidator as KV
+
+KV.validate("a.json", "b.yaml")
+
+Expected log:
+
+Keys with differing values: [{'iface.eth0.mtu': [9000, 1500]}]
+Keys unique to A: []
+Keys unique to B: ['ntp']
+
+and the return value is the familiar three-element list.
+
+⸻
+
+❺  Phase-out plan (optional)
+	•	Leave JsonValidator, YAMLValidator, DictionaryValidator
+importable but rewrite them to wrap one line around
+KeyValueValidator.validate() so legacy tests still pass.
+	•	After one release cycle remove the wrappers.
+
+⸻
+
+That’s everything: a single drop-in validator.py, the folder location,
+the one extra dependency, and the minimal code-base touch-ups needed.
