@@ -1,0 +1,170 @@
+Exactly what to paste and exactly where
+	1.	Open your current validator.py.
+	2.	Find the imports block at the very top.
+It ends with the last line that begins with import or from … import ….
+In the code you showed earlier that line is:
+
+from typing import Union, Any
+
+	3.	Immediately after that line (i.e. one blank line below it, but before the first class definition class Validator(ABC):) paste the entire block that follows.
+
+⸻
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✨ BEGIN – Universal key-value backend (Json / YAML / netplan / libconfig / kv) ✨
+# ─────────────────────────────────────────────────────────────────────────────
+from __future__ import annotations
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any
+
+import libconf             #  pip install libconf>=2.0.0
+from ruamel.yaml import YAML
+import json                 # json was already imported earlier – harmless repeat
+
+# ── 1. ConfigLoader ──────────────────────────────────────────────────────────
+class ConfigLoaderError(RuntimeError):
+    """Raised when we cannot read or parse the requested config."""
+
+class ConfigLoader:
+    _yaml = YAML(typ="safe")
+
+    @staticmethod
+    def load(src: str | Path, *, fmt: str | None = None, kv_sep: str = "=") -> dict:
+        blob = ConfigLoader._read(src)
+        fmt = fmt or ConfigLoader._guess_format(src)
+        match fmt.lower():
+            case "json":
+                return json.loads(blob)
+            case "yaml" | "yml" | "netplan":
+                return ConfigLoader._yaml.load(blob)
+            case "libconfig" | "cfg":
+                return libconf.loads(blob)
+            case "kv" | "properties":
+                return ConfigLoader._kv_to_dict(blob, sep=kv_sep)
+            case _:
+                raise ConfigLoaderError(f"Unknown / unsupported format: {fmt}")
+
+    # helpers ---------------------------------------------------------------
+    @staticmethod
+    def _read(src: str | Path) -> str:
+        if isinstance(src, (Path, str)) and Path(src).exists():
+            return Path(src).read_text(encoding="utf-8")
+        return str(src)        # caller already passed raw text
+
+    @staticmethod
+    def _guess_format(src: str | Path) -> str:
+        ext = Path(src).suffix.lower().lstrip(".") if isinstance(src, (Path, str)) else ""
+        return ext or "json"
+
+    @staticmethod
+    def _kv_to_dict(text: str, *, sep="=") -> dict[str, str]:
+        out: dict[str, str] = {}
+        for ln in text.splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and sep in ln:
+                k, v = ln.split(sep, 1)
+                out[k.strip()] = v.strip()
+        return out
+
+
+# ── 2. Dict comparator ───────────────────────────────────────────────────────
+@dataclass
+class DiffReport:
+    different_values: list[dict[str, list[Any]]] = field(default_factory=list)
+    missing_from_b:   list[str]                  = field(default_factory=list)
+    extra_in_b:       list[str]                  = field(default_factory=list)
+
+    def is_match(self, *, ignore_extra=False) -> bool:
+        if self.different_values or self.missing_from_b:
+            return False
+        if not ignore_extra and self.extra_in_b:
+            return False
+        return True
+
+
+def _compare_dicts(a: dict, b: dict, *, _path="") -> DiffReport:
+    rpt = DiffReport()
+    ka, kb = set(a), set(b)
+
+    rpt.missing_from_b.extend(sorted(f"{_path}{k}" for k in ka - kb))
+    rpt.extra_in_b.extend(sorted(f"{_path}{k}" for k in kb - ka))
+
+    for k in ka & kb:
+        pa, va, vb = f"{_path}{k}", a[k], b[k]
+        if isinstance(va, dict) and isinstance(vb, dict):
+            child = _compare_dicts(va, vb, _path=f"{pa}.")
+            rpt.different_values.extend(child.different_values)
+            rpt.missing_from_b.extend(child.missing_from_b)
+            rpt.extra_in_b.extend(child.extra_in_b)
+        elif va != vb:
+            rpt.different_values.append({pa: [va, vb]})
+    return rpt
+
+
+# ── 3. Public façade – KeyValueValidator ─────────────────────────────────────
+# NOTE: this relies on your existing ABC class `Validator` already defined later
+class KeyValueValidator(Validator):
+    """
+    Unified replacement for JsonValidator / YAMLValidator / DictionaryValidator.
+    """
+
+    @classmethod
+    def validate(cls,
+                 a,
+                 b,
+                 *,
+                 fmtA: str | None = None,
+                 fmtB: str | None = None,
+                 kv_sep: str = "=",
+                 ignore_extra: bool = False):
+        try:
+            dict_a = ConfigLoader.load(a, fmt=fmtA, kv_sep=kv_sep)
+            dict_b = ConfigLoader.load(b, fmt=fmtB, kv_sep=kv_sep)
+        except ConfigLoaderError as e:
+            cls._log(LogLevel.ERROR, str(e))
+            return False
+
+        rpt = _compare_dicts(dict_a, dict_b)
+
+        # identical?
+        if rpt.is_match(ignore_extra=ignore_extra):
+            cls._log(LogLevel.INFO, "All keys and values match")
+            return True
+
+        # legacy tuple so existing callers still work
+        legacy = [rpt.different_values, rpt.missing_from_b, rpt.extra_in_b]
+        cls.logValidationResults(legacy, "A", "B")
+        return legacy
+# ─────────────────────────────────────────────────────────────────────────────
+# ✨ END – Universal backend block
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+⸻
+
+After pasting
+	•	No other code moves. Your original class Validator(ABC):, TCPValidator, PingValidator, etc. stay exactly where they already are.
+	•	Install the only new dependency
+
+pip install libconf>=2.0.0
+
+
+	•	Switch callers from
+
+JsonValidator.validate(...)
+
+# or
+YAMLValidator.validate(...)
+
+# or
+DictionaryValidator.validate(...)
+
+to
+
+KeyValueValidator.validate(...)
+
+Add ignore_extra=True if you don’t want “keys only in B” counted as a failure.
+
+That’s all—you’ve inserted the new backend, kept every old class intact, and you can migrate usage at your own pace.
